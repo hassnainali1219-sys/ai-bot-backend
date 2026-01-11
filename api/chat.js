@@ -119,6 +119,12 @@ import { GoogleGenAI } from "@google/genai";
 
 let cachedClient = null;
 
+if (req.method === "GET") {
+  return res.json({
+    message: "Chat endpoint is working. Use POST method."
+  });
+}
+
 async function getDB() {
   if (!cachedClient) {
     cachedClient = new MongoClient(process.env.MONGODB_URI);
