@@ -41,7 +41,7 @@ const genAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
-/* ---------------- IDENTITY PROMPT (CRITICAL) ---------------- */
+/* ---------------- IDENTITY PROMPT ---------------- */
 const IDENTITY_PROMPT = `
 You are Hassnain Ali’s professional portfolio assistant.
 
@@ -59,6 +59,14 @@ Reply exactly:
 If you do not know something, say you will connect the user with Hassnain Ali.
 `;
 
+/* ---------------- GLOBAL REQUEST TIMEOUT ---------------- */
+app.use((req, res, next) => {
+  res.setTimeout(10000, () => {
+    res.status(408).json({ error: "Request timeout" });
+  });
+  next();
+});
+
 /* ---------------- HEALTH CHECK ---------------- */
 app.get("/api/health", (req, res) => {
   res.json({ status: "OK" });
@@ -74,13 +82,11 @@ app.post("/api/train-txt", upload.single("file"), async (req, res) => {
     const text = req.file.buffer.toString("utf-8");
     const database = await connectDB();
 
-    await database
-      .collection("settings")
-      .updateOne(
-        { type: "bot_instruction" },
-        { $set: { content: text } },
-        { upsert: true }
-      );
+    await database.collection("settings").updateOne(
+      { type: "bot_instruction" },
+      { $set: { content: text } },
+      { upsert: true }
+    );
 
     res.json({ message: "Bot trained successfully!" });
   } catch (err) {
@@ -114,7 +120,7 @@ app.post("/api/chat", async (req, res) => {
       .collection("settings")
       .findOne({ type: "bot_instruction" });
 
-    /* ---- BASE PROMPT (SAFE) ---- */
+    /* ---- BASE PROMPT ---- */
     const basePrompt = `
 ${IDENTITY_PROMPT}
 
@@ -136,10 +142,27 @@ User: ${userMessage}
 Assistant:
 `;
 
-    const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: finalPrompt,
-    });
+    /* ---------------- GEMINI 1.5 FLASH (8s TIMEOUT) ---------------- */
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    let response;
+    try {
+      response = await genAI.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: finalPrompt,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (err.name === "AbortError") {
+        return res.status(504).json({
+          reply: "Response took too long. Please try again.",
+        });
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const reply =
       response?.candidates?.[0]?.content?.parts?.[0]?.text ||
