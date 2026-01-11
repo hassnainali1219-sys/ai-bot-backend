@@ -8,7 +8,15 @@ const { GoogleGenAI } = require("@google/genai");
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ----------------- Age Calculation -----------------
+/* =========================
+   Middleware
+========================= */
+app.use(cors());
+app.use(express.json());
+
+/* =========================
+   Helper: Age Calculation
+========================= */
 function calculateAge() {
   const birthYear = 2002;
   const birthMonth = 5; // June (0-based)
@@ -20,10 +28,9 @@ function calculateAge() {
   return age;
 }
 
-app.use(cors());
-app.use(express.json());
-
-// ----------------- MongoDB Setup -----------------
+/* =========================
+   MongoDB Setup
+========================= */
 const client = new MongoClient(process.env.MONGODB_URI);
 let db;
 
@@ -36,13 +43,28 @@ async function connectDB() {
   return db;
 }
 
-// ----------------- Google AI Client -----------------
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+/* =========================
+   Google Gemini Setup
+========================= */
+const genAI = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+});
 
-// ----------------- 1. Train API -----------------
+/* =========================
+   Health Check (IMPORTANT)
+========================= */
+app.get("/api/health", (req, res) => {
+  res.json({ status: "OK" });
+});
+
+/* =========================
+   1. Train with TXT
+========================= */
 app.post("/api/train-txt", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "File missing" });
+    if (!req.file) {
+      return res.status(400).json({ error: "File missing" });
+    }
 
     const extractedText = req.file.buffer.toString("utf-8");
 
@@ -55,82 +77,87 @@ app.post("/api/train-txt", upload.single("file"), async (req, res) => {
         { upsert: true }
       );
 
-    console.log("✅ Bot instructions saved to DB");
     res.json({ message: "Bot trained successfully!" });
-  } catch (e) {
-    console.error("!!! TRAIN ERROR !!!", e.message);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error("TRAIN ERROR:", err);
+    res.status(500).json({ error: "Training failed" });
   }
 });
 
-// ----------------- 2. Chat API -----------------
+/* =========================
+   2. Chat API
+========================= */
 app.post("/api/chat", async (req, res) => {
   try {
     const { userMessage, conversation = [] } = req.body;
 
+    if (!userMessage) {
+      return res.status(400).json({ error: "userMessage is required" });
+    }
+
     const lowerMsg = userMessage.toLowerCase();
 
-    // --------- Handle special questions (age, etc.) first ---------
-   if (lowerMsg.includes("age") && lowerMsg.includes("hassnain")) {
-  const age = calculateAge();
-  const currentYear = new Date().getFullYear(); // get current year dynamically
-  return res.json({
-    reply: `${age} years old in ${currentYear} (born June 2002)`,
-  });
-}
+    // Special hard-coded answer
+    if (lowerMsg.includes("age") && lowerMsg.includes("hassnain")) {
+      const age = calculateAge();
+      const year = new Date().getFullYear();
+      return res.json({
+        reply: `${age} years old in ${year} (born June 2002)`,
+      });
+    }
 
-
-    // Connect DB and get base prompt
+    // Load base prompt from DB
     const db = await connectDB();
     const config = await db
       .collection("settings")
       .findOne({ type: "bot_instruction" });
+
     const basePrompt = config?.content || "You are a helpful AI assistant.";
 
-    // Convert conversation to text
     const conversationText = conversation
-      .map((msg) => `${msg.role}: ${msg.content}`)
+      .map((m) => `${m.role}: ${m.content}`)
       .join("\n");
 
-    const fullPrompt = `${basePrompt}\nConversation so far:\n${conversationText}\nUser: ${userMessage}\nAssistant:`;
+    const fullPrompt = `
+${basePrompt}
 
-    // Gemini API call
+Conversation so far:
+${conversationText}
+
+User: ${userMessage}
+Assistant:
+`;
+
     const response = await genAI.models.generateContent({
       model: "gemini-2.5-flash",
       contents: fullPrompt,
     });
 
-    // Extract AI response safely
-    let text = "No reply from AI";
-    if (response?.candidates?.length > 0) {
-      const candidate = response.candidates[0];
-      const parts = candidate.content?.parts;
-      if (parts?.length > 0) {
-        text = parts[0].text || text;
-      }
+    let reply = "No reply from AI";
+
+    if (
+      response &&
+      response.candidates &&
+      response.candidates.length > 0 &&
+      response.candidates[0].content &&
+      response.candidates[0].content.parts &&
+      response.candidates[0].content.parts.length > 0
+    ) {
+      reply = response.candidates[0].content.parts[0].text || reply;
     }
 
-    console.log("🤖 Bot Answered Successfully:", text);
-    res.json({ reply: text });
-  } catch (e) {
-    console.error("!!! CHAT ERROR !!!", e.message);
-    res.status(500).json({ error: "Something went wrong. Check server logs." });
+    res.json({ reply });
+  } catch (err) {
+    console.error("CHAT ERROR:", err);
+    res.status(500).json({ error: "Something went wrong" });
   }
 });
 
-// ----------------- Optional: List Models -----------------
-async function listModels() {
-  try {
-    const models = await genAI.models.list();
-    console.log("Available Models:", models);
-  } catch (e) {
-    console.error("Error listing models:", e.message);
-  }
-}
-// listModels(); // Uncomment if needed
-
-// ----------------- Start Server -----------------
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
-);
+/* =========================
+   IMPORTANT FOR VERCEL
+========================= */
+/**
+ * ❌ DO NOT use app.listen()
+ * ✅ Export app for Vercel serverless
+ */
+module.exports = app;
