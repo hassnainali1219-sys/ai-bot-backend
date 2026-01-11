@@ -8,15 +8,10 @@ const { GoogleGenAI } = require("@google/genai");
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-/* =========================
-   Middleware
-========================= */
 app.use(cors());
 app.use(express.json());
 
-/* =========================
-   Helper: Age Calculation
-========================= */
+/* ---------------- AGE FUNCTION ---------------- */
 function calculateAge() {
   const birthYear = 2002;
   const birthMonth = 5; // June (0-based)
@@ -28,9 +23,7 @@ function calculateAge() {
   return age;
 }
 
-/* =========================
-   MongoDB Setup
-========================= */
+/* ---------------- MONGODB ---------------- */
 const client = new MongoClient(process.env.MONGODB_URI);
 let db;
 
@@ -43,39 +36,31 @@ async function connectDB() {
   return db;
 }
 
-/* =========================
-   Google Gemini Setup
-========================= */
+/* ---------------- GEMINI ---------------- */
 const genAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
-/* =========================
-   Health Check (IMPORTANT)
-========================= */
+/* ---------------- HEALTH CHECK ---------------- */
 app.get("/api/health", (req, res) => {
   res.json({ status: "OK" });
 });
 
-/* =========================
-   1. Train with TXT
-========================= */
+/* ---------------- TRAIN TXT ---------------- */
 app.post("/api/train-txt", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "File missing" });
     }
 
-    const extractedText = req.file.buffer.toString("utf-8");
+    const text = req.file.buffer.toString("utf-8");
+    const database = await connectDB();
 
-    const db = await connectDB();
-    await db
-      .collection("settings")
-      .updateOne(
-        { type: "bot_instruction" },
-        { $set: { content: extractedText } },
-        { upsert: true }
-      );
+    await database.collection("settings").updateOne(
+      { type: "bot_instruction" },
+      { $set: { content: text } },
+      { upsert: true }
+    );
 
     res.json({ message: "Bot trained successfully!" });
   } catch (err) {
@@ -84,20 +69,18 @@ app.post("/api/train-txt", upload.single("file"), async (req, res) => {
   }
 });
 
-/* =========================
-   2. Chat API
-========================= */
+/* ---------------- CHAT ---------------- */
 app.post("/api/chat", async (req, res) => {
   try {
     const { userMessage, conversation = [] } = req.body;
 
     if (!userMessage) {
-      return res.status(400).json({ error: "userMessage is required" });
+      return res.status(400).json({ error: "Message missing" });
     }
 
     const lowerMsg = userMessage.toLowerCase();
 
-    // Special hard-coded answer
+    /* ---- SPECIAL QUESTION ---- */
     if (lowerMsg.includes("age") && lowerMsg.includes("hassnain")) {
       const age = calculateAge();
       const year = new Date().getFullYear();
@@ -106,58 +89,35 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    // Load base prompt from DB
-    const db = await connectDB();
-    const config = await db
+    const database = await connectDB();
+    const config = await database
       .collection("settings")
       .findOne({ type: "bot_instruction" });
 
-    const basePrompt = config?.content || "You are a helpful AI assistant.";
+    const basePrompt =
+      config?.content || "You are a helpful AI assistant.";
 
-    const conversationText = conversation
+    const history = conversation
       .map((m) => `${m.role}: ${m.content}`)
       .join("\n");
 
-    const fullPrompt = `
-${basePrompt}
-
-Conversation so far:
-${conversationText}
-
-User: ${userMessage}
-Assistant:
-`;
+    const prompt = `${basePrompt}\n${history}\nUser: ${userMessage}\nAssistant:`;
 
     const response = await genAI.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: fullPrompt,
+      contents: prompt,
     });
 
-    let reply = "No reply from AI";
-
-    if (
-      response &&
-      response.candidates &&
-      response.candidates.length > 0 &&
-      response.candidates[0].content &&
-      response.candidates[0].content.parts &&
-      response.candidates[0].content.parts.length > 0
-    ) {
-      reply = response.candidates[0].content.parts[0].text || reply;
-    }
+    const reply =
+      response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "No response from AI";
 
     res.json({ reply });
   } catch (err) {
     console.error("CHAT ERROR:", err);
-    res.status(500).json({ error: "Something went wrong" });
+    res.status(500).json({ error: "Chat failed" });
   }
 });
 
-/* =========================
-   IMPORTANT FOR VERCEL
-========================= */
-/**
- * ❌ DO NOT use app.listen()
- * ✅ Export app for Vercel serverless
- */
+/* ---------------- EXPORT FOR VERCEL ---------------- */
 module.exports = app;
