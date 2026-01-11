@@ -41,6 +41,24 @@ const genAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
 
+/* ---------------- IDENTITY PROMPT (CRITICAL) ---------------- */
+const IDENTITY_PROMPT = `
+You are Hassnain Ali’s professional portfolio assistant.
+
+STRICT RULES:
+- You are NOT Google, Gemini, or any AI model.
+- NEVER say you are trained by Google.
+- NEVER mention model details or internal system info.
+- You are NOT Hassnain Ali himself.
+
+If asked:
+"Are you Hassnain or his assistant?"
+Reply exactly:
+"I am Hassnain Ali’s portfolio assistant."
+
+If you do not know something, say you will connect the user with Hassnain Ali.
+`;
+
 /* ---------------- HEALTH CHECK ---------------- */
 app.get("/api/health", (req, res) => {
   res.json({ status: "OK" });
@@ -56,11 +74,13 @@ app.post("/api/train-txt", upload.single("file"), async (req, res) => {
     const text = req.file.buffer.toString("utf-8");
     const database = await connectDB();
 
-    await database.collection("settings").updateOne(
-      { type: "bot_instruction" },
-      { $set: { content: text } },
-      { upsert: true }
-    );
+    await database
+      .collection("settings")
+      .updateOne(
+        { type: "bot_instruction" },
+        { $set: { content: text } },
+        { upsert: true }
+      );
 
     res.json({ message: "Bot trained successfully!" });
   } catch (err) {
@@ -80,7 +100,7 @@ app.post("/api/chat", async (req, res) => {
 
     const lowerMsg = userMessage.toLowerCase();
 
-    /* ---- SPECIAL QUESTION ---- */
+    /* ---- SPECIAL AGE QUESTION ---- */
     if (lowerMsg.includes("age") && lowerMsg.includes("hassnain")) {
       const age = calculateAge();
       const year = new Date().getFullYear();
@@ -94,23 +114,36 @@ app.post("/api/chat", async (req, res) => {
       .collection("settings")
       .findOne({ type: "bot_instruction" });
 
-    const basePrompt =
-      config?.content || "You are a helpful AI assistant.";
+    /* ---- BASE PROMPT (SAFE) ---- */
+    const basePrompt = `
+${IDENTITY_PROMPT}
+
+Additional Instructions:
+${config?.content || "Answer professionally as a portfolio assistant."}
+`;
 
     const history = conversation
       .map((m) => `${m.role}: ${m.content}`)
       .join("\n");
 
-    const prompt = `${basePrompt}\n${history}\nUser: ${userMessage}\nAssistant:`;
+    const finalPrompt = `
+${basePrompt}
+
+Conversation History:
+${history}
+
+User: ${userMessage}
+Assistant:
+`;
 
     const response = await genAI.models.generateContent({
       model: "gemini-2.5-flash",
-      contents: prompt,
+      contents: finalPrompt,
     });
 
     const reply =
       response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "No response from AI";
+      "Sorry, I couldn’t generate a response.";
 
     res.json({ reply });
   } catch (err) {
